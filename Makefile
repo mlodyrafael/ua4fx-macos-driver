@@ -8,7 +8,7 @@
 #   make uninstall
 #
 CC       ?= clang
-ARCHS    ?= arm64
+ARCHS    ?= $(shell uname -m)
 MINOS    ?= 13.0
 CFLAGS   ?= -O2
 CFLAGS   += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations -fblocks \
@@ -52,7 +52,7 @@ ui: $(BUILD)/UA4FX\ Control.app/Contents/MacOS/UA4FXControl
 $(BUILD)/UA4FX\ Control.app/Contents/MacOS/UA4FXControl: ui/UA4FXControl.swift ui/Info.plist
 	@mkdir -p "$(BUILD)/UA4FX Control.app/Contents/MacOS" "$(BUILD)/UA4FX Control.app/Contents/Resources"
 	cp ui/Info.plist "$(BUILD)/UA4FX Control.app/Contents/Info.plist"
-	swiftc -O -parse-as-library -target arm64-apple-macos13.0 -o "$@" ui/UA4FXControl.swift -framework SwiftUI -framework CoreAudio -framework CoreMIDI -framework AppKit
+	swiftc -O -parse-as-library -target $(firstword $(ARCHS))-apple-macos$(MINOS) -o "$@" ui/UA4FXControl.swift -framework SwiftUI -framework CoreAudio -framework CoreMIDI -framework AppKit
 	codesign --force --sign - "$(BUILD)/UA4FX Control.app"
 
 install: driver midi ui

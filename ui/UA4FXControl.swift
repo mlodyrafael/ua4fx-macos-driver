@@ -71,7 +71,8 @@ final class Model: ObservableObject {
     @Published var device: AudioObjectID? = nil
     @Published var stats: [String: Any] = [:]
     @Published var framesPerXfer = 1
-    @Published var xfersInFlight = 3
+    @Published var xfersInFlight = 4
+    @Published var xfersInFlightOut = 8
     @Published var inputGain = 0.0      // trim (dB), set here
     @Published var outputGain = 7.0     // trim (dB), set here
     @Published var inputVol = 0.0       // macOS volume control (dB), read back
@@ -104,6 +105,7 @@ final class Model: ObservableObject {
         suppress = true
         framesPerXfer = c["framesPerXfer"] as? Int ?? framesPerXfer
         xfersInFlight = c["xfersInFlight"] as? Int ?? xfersInFlight
+        xfersInFlightOut = c["xfersInFlightOut"] as? Int ?? xfersInFlightOut
         inputGain = c["inputTrimDB"] as? Double ?? inputGain
         outputGain = c["outputTrimDB"] as? Double ?? outputGain
         inputVol = c["inputVolumeDB"] as? Double ?? inputVol
@@ -117,7 +119,7 @@ final class Model: ObservableObject {
         let st = HAL.setConfig(dev, d)
         lastError = st == noErr ? "" : "Set config failed: \(st)"
     }
-    func applyGeometry() { push(["framesPerXfer": framesPerXfer, "xfersInFlight": xfersInFlight]) }
+    func applyGeometry() { push(["framesPerXfer": framesPerXfer, "xfersInFlight": xfersInFlight, "xfersInFlightOut": xfersInFlightOut]) }
     func applyGains() { push(["inputTrimDB": inputGain, "outputTrimDB": outputGain, "inputMute": inputMute, "outputMute": outputMute]) }
 
     var rate: Double { stats["sampleRate"] as? Double ?? 48000 }
@@ -126,7 +128,7 @@ final class Model: ObservableObject {
     func dbl(_ k: String) -> Double { (stats[k] as? Double) ?? Double(stats[k] as? Int ?? 0) }
     func bool(_ k: String) -> Bool { stats[k] as? Bool ?? false }
     // predicted safety offsets for the *selected* geometry (same formula as the engine)
-    var predictedOut: Double { (Double(xfersInFlight + 1) * Double(framesPerXfer) + 1.5) }
+    var predictedOut: Double { (Double(xfersInFlightOut + 1) * Double(framesPerXfer) + 1.5) }
     var predictedIn: Double { Double(framesPerXfer) + 1.5 }
 }
 
@@ -159,13 +161,14 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("Preset:")
-                            Button("Lowest") { m.framesPerXfer = 1; m.xfersInFlight = 4; m.applyGeometry() }
-                            Button("Low (default)") { m.framesPerXfer = 1; m.xfersInFlight = 5; m.applyGeometry() }
-                            Button("Balanced") { m.framesPerXfer = 2; m.xfersInFlight = 4; m.applyGeometry() }
-                            Button("Safe") { m.framesPerXfer = 2; m.xfersInFlight = 6; m.applyGeometry() }
+                            Button("Lowest") { m.framesPerXfer = 1; m.xfersInFlight = 3; m.xfersInFlightOut = 6; m.applyGeometry() }
+                            Button("Low (default)") { m.framesPerXfer = 1; m.xfersInFlight = 4; m.xfersInFlightOut = 8; m.applyGeometry() }
+                            Button("Balanced") { m.framesPerXfer = 2; m.xfersInFlight = 4; m.xfersInFlightOut = 6; m.applyGeometry() }
+                            Button("Safe") { m.framesPerXfer = 2; m.xfersInFlight = 6; m.xfersInFlightOut = 8; m.applyGeometry() }
                         }
                         Stepper("USB transfer size: \(m.framesPerXfer) ms", value: $m.framesPerXfer, in: 1...8, onEditingChanged: { if !$0 { m.applyGeometry() } })
-                        Stepper("Transfers in flight: \(m.xfersInFlight)", value: $m.xfersInFlight, in: 2...8, onEditingChanged: { if !$0 { m.applyGeometry() } })
+                        Stepper("Capture transfers in flight: \(m.xfersInFlight)", value: $m.xfersInFlight, in: 2...8, onEditingChanged: { if !$0 { m.applyGeometry() } })
+                        Stepper("Playback transfers in flight: \(m.xfersInFlightOut)", value: $m.xfersInFlightOut, in: 2...8, onEditingChanged: { if !$0 { m.applyGeometry() } })
                         Divider()
                         StatusRow(label: "Output safety offset (driver)", value: m.ms(m.stats["safetyOffsetOutput"]))
                         StatusRow(label: "Input safety offset (driver)", value: m.ms(m.stats["safetyOffsetInput"]))

@@ -29,7 +29,8 @@ extern "C" {
 #define UA4FX_MAX_FRAMES_PER_XFER   8     /* ms of audio per isoch transfer   */
 #define UA4FX_MAX_XFERS_IN_FLIGHT   8     /* transfers queued per direction    */
 #define UA4FX_DEFAULT_FRAMES_PER_XFER 1
-#define UA4FX_DEFAULT_XFERS_IN_FLIGHT 5
+#define UA4FX_DEFAULT_XFERS_IN_FLIGHT 4       /* capture queue depth  */
+#define UA4FX_DEFAULT_XFERS_IN_FLIGHT_OUT 8   /* playback queue depth: OUT completions arrive up to ~3.5 ms late on XHCI */
 #define UA4FX_RING_FRAMES           32768 /* power of two, audio frames        */
 
 typedef struct ua4fx_engine ua4fx_engine_t;
@@ -40,7 +41,8 @@ typedef void (*ua4fx_hotplug_cb)(void *ctx, bool arrived);
 /* Runtime-tunable geometry. Applied at the next start. */
 typedef struct {
     uint32_t framesPerXfer;    /* 1..UA4FX_MAX_FRAMES_PER_XFER (ms per transfer) */
-    uint32_t xfersInFlight;    /* 2..UA4FX_MAX_XFERS_IN_FLIGHT                   */
+    uint32_t xfersInFlight;    /* capture:  2..UA4FX_MAX_XFERS_IN_FLIGHT         */
+    uint32_t xfersInFlightOut; /* playback: 2..UA4FX_MAX_XFERS_IN_FLIGHT         */
 } ua4fx_config_t;
 
 /* Lifecycle */
@@ -81,7 +83,7 @@ void ua4fx_engine_write_output(ua4fx_engine_t *e, int64_t sampleTime, uint32_t f
 /* Diagnostics */
 typedef struct {
     bool     running, inputActive, outputActive, captureMaster;
-    uint32_t framesPerXfer, xfersInFlight;
+    uint32_t framesPerXfer, xfersInFlight, xfersInFlightOut;
     uint64_t rxFrames, txFrames;       /* audio frames */
     uint64_t rxPackets, txPackets;     /* USB packets */
     uint64_t rxErrors, txErrors;       /* frames with frStatus != 0 */

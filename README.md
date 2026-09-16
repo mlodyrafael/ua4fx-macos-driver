@@ -24,6 +24,26 @@ per-user launch agent bridging USB-MIDI packets to CoreMIDI virtual endpoints.
 └────────────┘                   └──────────────────┘
 ```
 
+## Quick start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mlodyrafael/ua4fx-macos-driver/main/install.sh | bash
+```
+
+That clones the repo to `~/ua4fx-macos-driver`, builds it locally (needs the Xcode Command
+Line Tools; the script starts their installer if they are missing), asks for your password
+once to place the HAL plug-in in `/Library/Audio/Plug-Ins/HAL`, installs the MIDI bridge
+launch agent and `UA4FX Control.app`, and restarts coreaudiod. Then plug the UA-4FX in with
+its rear switch on **ADVANCED**.
+
+**Does it start by itself?** Yes. The HAL plug-in is loaded by coreaudiod at boot and waits
+for the device: plug the unit in at any time and "EDIROL UA-4FX" appears (and disappears
+again when you unplug it; hot-unplug is handled cleanly). The MIDI bridge is a per-user
+launch agent (`RunAtLoad` + `KeepAlive`), so it starts at login and attaches whenever the
+device shows up. Nothing needs to be opened manually; the control app is optional.
+
+Uninstall: `cd ~/ua4fx-macos-driver && make uninstall`.
+
 **Is it "ASIO"?** ASIO is Windows-only. On macOS the native low-latency path is CoreAudio,
 and this driver *is* a CoreAudio device: every DAW (Logic, Ableton, Reaper, Pro Tools…) uses it
 directly with the buffer size you pick in the DAW. Driver-side latency is set in UA4FX Control.
@@ -37,7 +57,8 @@ directly with the buffer size you pick in the DAW. Driver-side latency is set in
 | MIDI bridge (`midi/ua4fx_midid.c`) | Attaches to the MIDI interface and publishes "UA-4FX MIDI In/Out"; packet coding is standard USB-MIDI. Not yet exercised with a MIDI instrument |
 | 96 kHz modes | Untested (switch was at 48 kHz). Designed for: half-duplex; the engine keeps whichever direction the device offers |
 | Volume / mute | Two layers: a *trim* set in UA4FX Control (default output +7 dB, input 0 dB) plus the macOS volume control (0…−60 dB, slider / media keys) exposed as HAL control objects. Effective gain = trim + volume |
-| UA4FX Control.app (`ui/`) | SwiftUI app: latency presets (USB transfer size / transfers in flight), software input/output gain + mute, live engine statistics, MIDI bridge status, coreaudiod restart |
+| Hot-plug | Verified: unplugging removes the device cleanly (coreaudiod and the MIDI bridge keep running), plugging in re-creates it |
+| UA4FX Control.app (`ui/`) | SwiftUI app: latency presets (USB transfer size / capture & playback queue depth), software input/output gain + mute, live engine statistics, MIDI bridge status, coreaudiod restart |
 
 ## Build & install
 
@@ -98,9 +119,11 @@ script falls back to `sudo killall coreaudiod` (launchd relaunches it immediatel
   `frTimeStamp` values (updated at primary interrupt time). The first transfer's timestamps
   are unreliable on XHCI, so the timeline origin is fixed from the second completed transfer
   before `StartIO` returns. Reported clock algorithm: 12-point moving average.
-* **Latency.** Default 1 ms transfers, 5 in flight per direction: safety offset 7.5 ms out /
-  2.5 ms in (360 / 120 frames at 48 kHz). 1 × 3 proved too tight on this XHCI: transfers were
-  refused as IsoTooOld about twice a second (schedule resyncs), which produced the v0.2 "bit-crush"
+* **Latency.** Default 1 ms transfers, 4 in flight for capture and 8 for playback: safety
+  offset 10.5 ms out / 2.5 ms in (504 / 120 frames at 48 kHz). Queue depth only affects the
+  *output* safety offset; input latency depends on the transfer size alone. Shallower queues
+  proved too tight on Apple's XHCI: OUT completions arrive up to ~3.5 ms after the frame ended,
+  so transfers were refused as IsoTooOld (schedule resyncs), which produced the v0.2 "bit-crush"
   artifacts. A resync now moves both streams to a common frame and hard-realigns the playback
   read pointer to the capture timeline instead of chasing the phase with a rate change. Runtime-tunable from UA4FX Control (1–8 ms, 2–8
   transfers); a change goes through `RequestDeviceConfigurationChange`, so the host stops and
@@ -117,6 +140,10 @@ script falls back to `sudo killall coreaudiod` (launchd relaunches it immediatel
   `AudioServerPlugIn_IOKitUserClients`.
 * **Hot-plug.** The plug-in is always loaded; it watches IOKit for the device and publishes /
   withdraws the CoreAudio device with `PropertiesChanged(kAudioPlugInPropertyDeviceList)`.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Not affiliated with or endorsed by Roland Corporation.
 
 ## Layout
 

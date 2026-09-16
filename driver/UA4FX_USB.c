@@ -41,7 +41,8 @@
 #include <string.h>
 
 #define NF   ((int)e->nf)      /* runtime geometry; `e` must be in scope */
-#define NBUF ((int)e->nbuf)
+#define NBUF ((int)e->nbuf)    /* capture queue depth; playback uses e->nbufOut (see SNB) */
+#define SNB(s) ((int)(s)->nbuf)
 #define RING UA4FX_RING_FRAMES
 #define BPF  UA4FX_BYTES_PER_FRAME
 #define START_LEAD_FRAMES 4     /* schedule the first transfer this many bus frames ahead */
@@ -69,6 +70,7 @@ typedef struct stream {
     bool    streaming;    /* alt 1 selected and transfers queued */
     bool    stopping;
     xfer_t  xf[UA4FX_MAX_XFERS_IN_FLIGHT];
+    uint32_t nbuf;        /* transfers in flight for this stream */
     int     inFlight;
     UInt64  nextFrame;    /* next bus frame to schedule */
     UInt64  lastFrameDone;/* last bus frame whose completion we processed */
@@ -99,7 +101,7 @@ struct ua4fx_engine {
     stream_t in, out;
 
     /* geometry (set before start) */
-    uint32_t nf, nbuf;
+    uint32_t nf, nbuf, nbufOut;
 
     /* IO state */
     atomic_bool running;
@@ -357,14 +359,14 @@ static void engine_resync(engine_t *e, stream_t *s, const char *why) {
         e->lastResyncHost = now;
         LOGE("resync #%llu (%s on %s): bus frame %llu, rescheduling from %llu; maxCompletionLat=%.0fus late=%u nf=%u nbuf=%u",
              (unsigned long long)e->resyncs, why, s->isInput ? "in" : "out", (unsigned long long)f, (unsigned long long)R,
-             e->maxCompletionLatUs, e->lateCompletions, e->nf, e->nbuf);
+             e->maxCompletionLatUs, e->lateCompletions, e->nf, s->isInput ? e->nbuf : e->nbufOut);
     }
 }
 
 /* Re-queue every idle transfer of a stream (after errors some may be parked). */
 static IOReturn stream_fill_queue(stream_t *s) {
-    engine_t *e = s->e; IOReturn last = 0;
-    for (int b = 0; b < NBUF; b++) if (!s->xf[b].inFlight) { IOReturn kr = submit_xfer(s, &s->xf[b]); if (kr) last = kr; }
+    IOReturn last = 0;
+    for (int b = 0; b < SNB(s); b++) if (!s->xf[b].inFlight) { IOReturn kr = submit_xfer(s, &s->xf[b]); if (kr) last = kr; }
     return last;
 }
 
@@ -418,7 +420,7 @@ static void xfer_complete(void *refcon, IOReturn result, void *arg0) {
      * index covers the same bus frames (both schedules started at f0 in lock-step). */
     if (s->isInput && e->captureMaster && e->out.streaming) {
         xfer_t *tx = NULL;
-        for (int b = 0; b < NBUF; b++) if (e->out.xf[b].frame == x->frame) { tx = &e->out.xf[b]; break; }
+        for (int b = 0; b < SNB(&e->out); b++) if (e->out.xf[b].frame == x->frame) { tx = &e->out.xf[b]; break; }
         if (tx && e->rxBusFrames >= 200) {
             int64_t err = (int64_t)tx->txEnd - (int64_t)e->rxCompleted;
             e->feedbackErr = (int32_t)err;
@@ -474,7 +476,8 @@ static bool stream_prepare(stream_t *s) {
         if ((*s->ifc)->GetPipeProperties(s->ifc, p, &dir, &num, &tt, &mps, &ivl) == 0 && tt == kUSBIsoc) { s->pipe = p; s->maxPacket = mps; break; }
     }
     if (!s->pipe) { LOGE("no isoc pipe on interface %u", s->ifnum); (*s->ifc)->SetAlternateInterface(s->ifc, 0); return false; }
-    for (int b = 0; b < NBUF; b++) {
+    s->nbuf = s->isInput ? e->nbuf : e->nbufOut;
+    for (int b = 0; b < SNB(s); b++) {
         xfer_t *x = &s->xf[b]; x->idx = b; x->stream = s; x->inFlight = false;
         kr = (*s->ifc)->LowLatencyCreateBuffer(s->ifc, (void **)&x->buf, s->maxPacket * NF, s->isInput ? kUSBLowLatencyReadBuffer : kUSBLowLatencyWriteBuffer);
         if (kr) { LOGE("LowLatencyCreateBuffer failed 0x%x", kr); return false; }
@@ -487,8 +490,7 @@ static bool stream_prepare(stream_t *s) {
 }
 
 static void stream_release_buffers(stream_t *s) {
-    engine_t *e = s->e;
-    for (int b = 0; b < NBUF; b++) {
+    for (int b = 0; b < UA4FX_MAX_XFERS_IN_FLIGHT; b++) {
         xfer_t *x = &s->xf[b];
         if (x->buf) { (*s->ifc)->LowLatencyDestroyBuffer(s->ifc, x->buf); x->buf = NULL; }
         if (x->fl)  { (*s->ifc)->LowLatencyDestroyBuffer(s->ifc, x->fl);  x->fl  = NULL; }
@@ -548,8 +550,8 @@ static void job_start(engine_t *e, void *arg) {
     atomic_store(&e->running, true);
 
     IOReturn kr = 0;
-    if (okIn)  { e->in.streaming  = true; for (int b = 0; b < NBUF && !kr; b++) kr = submit_xfer(&e->in,  &e->in.xf[b]); }
-    if (okOut && !kr) { e->out.streaming = true; for (int b = 0; b < NBUF && !kr; b++) kr = submit_xfer(&e->out, &e->out.xf[b]); }
+    if (okIn)  { e->in.streaming  = true; for (int b = 0; b < SNB(&e->in) && !kr; b++)  kr = submit_xfer(&e->in,  &e->in.xf[b]); }
+    if (okOut && !kr) { e->out.streaming = true; for (int b = 0; b < SNB(&e->out) && !kr; b++) kr = submit_xfer(&e->out, &e->out.xf[b]); }
     if (kr) {
         LOGE("initial submit failed 0x%x", kr);
         atomic_store(&e->running, false);
@@ -559,7 +561,7 @@ static void job_start(engine_t *e, void *arg) {
     /* wait (≤100 ms) for the timeline origin to be fixed from real frame timestamps */
     for (int i = 0; i < 50 && e->stampPending > 0; i++) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.002, true);
     if (e->stampPending > 0) LOGE("no completions within 100 ms; using extrapolated origin");
-    LOG("IO started: rate=%u in=%d out=%d captureMaster=%d nf=%u nbuf=%u f0=%llu", e->rate, okIn, okOut, e->captureMaster, e->nf, e->nbuf, (unsigned long long)f0);
+    LOG("IO started: rate=%u in=%d out=%d captureMaster=%d nf=%u nbufIn=%u nbufOut=%u f0=%llu", e->rate, okIn, okOut, e->captureMaster, e->nf, e->nbuf, e->nbufOut, (unsigned long long)f0);
     *res = 0;
 }
 
@@ -736,7 +738,7 @@ static void *usb_thread(void *arg) {
 ua4fx_engine_t *ua4fx_engine_create(void) {
     engine_t *e = calloc(1, sizeof *e);
     e->inRing = calloc(RING, BPF); e->outRing = calloc(RING, BPF);
-    e->nf = UA4FX_DEFAULT_FRAMES_PER_XFER; e->nbuf = UA4FX_DEFAULT_XFERS_IN_FLIGHT;
+    e->nf = UA4FX_DEFAULT_FRAMES_PER_XFER; e->nbuf = UA4FX_DEFAULT_XFERS_IN_FLIGHT; e->nbufOut = UA4FX_DEFAULT_XFERS_IN_FLIGHT_OUT;
     e->ready = dispatch_semaphore_create(0);
     e->seed = (uint64_t)mach_absolute_time();
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 512 * 1024);
@@ -770,17 +772,18 @@ uint32_t ua4fx_engine_zts_period(engine_t *e)     { uint32_t r = atomic_load(&e-
 static uint32_t ms_to_frames(engine_t *e, double ms) { return (uint32_t)((double)atomic_load(&e->rate) * ms / 1000.0 + 0.5); }
 /* Output: samples for bus frame F are read from the ring when the transfer is
  * queued, (NBUF)*NF ms before F, plus completion latency and margin. */
-uint32_t ua4fx_engine_safety_offset_output(engine_t *e) { return ms_to_frames(e, (NBUF + 1) * NF + 1.5); }
+uint32_t ua4fx_engine_safety_offset_output(engine_t *e) { return ms_to_frames(e, ((int)e->nbufOut + 1) * NF + 1.5); }
 /* Input: samples of bus frame F land in the ring at completion, ≤ NF ms + latency later. */
 uint32_t ua4fx_engine_safety_offset_input(engine_t *e)  { return ms_to_frames(e, NF + 1.5); }
 
 void ua4fx_engine_set_config(engine_t *e, const ua4fx_config_t *c) {
-    uint32_t nf = c->framesPerXfer, nb = c->xfersInFlight;
+    uint32_t nf = c->framesPerXfer, nb = c->xfersInFlight, no = c->xfersInFlightOut;
     if (nf < 1) nf = 1; if (nf > UA4FX_MAX_FRAMES_PER_XFER) nf = UA4FX_MAX_FRAMES_PER_XFER;
     if (nb < 2) nb = 2; if (nb > UA4FX_MAX_XFERS_IN_FLIGHT) nb = UA4FX_MAX_XFERS_IN_FLIGHT;
-    e->nf = nf; e->nbuf = nb;    /* picked up by the next start */
+    if (no < 2) no = 2; if (no > UA4FX_MAX_XFERS_IN_FLIGHT) no = UA4FX_MAX_XFERS_IN_FLIGHT;
+    e->nf = nf; e->nbuf = nb; e->nbufOut = no;    /* picked up by the next start */
 }
-void ua4fx_engine_get_config(engine_t *e, ua4fx_config_t *c) { c->framesPerXfer = e->nf; c->xfersInFlight = e->nbuf; }
+void ua4fx_engine_get_config(engine_t *e, ua4fx_config_t *c) { c->framesPerXfer = e->nf; c->xfersInFlight = e->nbuf; c->xfersInFlightOut = e->nbufOut; }
 uint32_t ua4fx_engine_latency_input(engine_t *e)  { (void)e; return 8; }
 uint32_t ua4fx_engine_latency_output(engine_t *e) { (void)e; return 8; }
 
@@ -816,7 +819,7 @@ void ua4fx_engine_write_output(engine_t *e, int64_t sampleTime, uint32_t frames,
 void ua4fx_engine_get_stats(engine_t *e, ua4fx_stats_t *o) {
     memset(o, 0, sizeof *o);
     o->running = atomic_load(&e->running); o->inputActive = o->running && e->in.streaming; o->outputActive = o->running && e->out.streaming;
-    o->captureMaster = e->captureMaster; o->framesPerXfer = e->nf; o->xfersInFlight = e->nbuf;
+    o->captureMaster = e->captureMaster; o->framesPerXfer = e->nf; o->xfersInFlight = e->nbuf; o->xfersInFlightOut = e->nbufOut;
     o->rxFrames = e->rxCompleted; o->txFrames = e->txCompleted;
     o->rxPackets = e->rxPackets; o->txPackets = e->txPackets;
     o->rxErrors = e->rxErrors; o->txErrors = e->txErrors; o->resyncs = e->resyncs;
