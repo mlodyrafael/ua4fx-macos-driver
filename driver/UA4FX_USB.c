@@ -446,7 +446,10 @@ static void harvest_locked(engine_t *e, xfer_t *force) {
 /* out.lock held: copy ring data into queued playback buffers up to bus frame `target` */
 static void fill_locked(engine_t *e, UInt64 target, UInt64 current) {
     stream_t *s = &e->out;
-    if (e->nextFillFrame < current + 1) { e->lateFills += (uint32_t)(current + 1 - e->nextFillFrame); e->nextFillFrame = current + 1; }
+    /* Frames before `current` are gone. `current` itself may still be fillable (the HC fetches
+     * isoch data close to transmission), so try it rather than skip it when our estimate of the
+     * current frame is off by one. */
+    if (e->nextFillFrame < current) { e->lateFills += (uint32_t)(current - e->nextFillFrame); e->nextFillFrame = current; }
     while (e->nextFillFrame <= target) {
         xfer_t *x = find_xfer(s, e->nextFillFrame);
         if (!x) {
@@ -815,7 +818,7 @@ static uint32_t ms_to_frames(engine_t *e, double ms) { return (uint32_t)((double
 /* Output: frame F is filled at the tick after frame F - lead starts, i.e. ~lead ms before it plays. */
 uint32_t ua4fx_engine_safety_offset_output(engine_t *e) { return ms_to_frames(e, (double)e->outLead + 1.5); }
 /* Input: frame F lands in the ring ≤ ~0.9 ms after it ends (measured), plus margin. */
-uint32_t ua4fx_engine_safety_offset_input(engine_t *e)  { return ms_to_frames(e, (double)e->nf + 0.5); }
+uint32_t ua4fx_engine_safety_offset_input(engine_t *e)  { return ms_to_frames(e, (double)e->nf + 1.0); }
 
 void ua4fx_engine_set_config(engine_t *e, const ua4fx_config_t *c) {
     uint32_t nf = c->framesPerXfer, nb = c->xfersInFlight, no = c->xfersInFlightOut, lead = c->outputLeadMs;
