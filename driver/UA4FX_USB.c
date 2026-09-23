@@ -814,8 +814,8 @@ uint32_t ua4fx_engine_zts_period(engine_t *e)     { uint32_t r = atomic_load(&e-
 static uint32_t ms_to_frames(engine_t *e, double ms) { return (uint32_t)((double)atomic_load(&e->rate) * ms / 1000.0 + 0.5); }
 /* Output: frame F is filled at the tick after frame F - lead starts, i.e. ~lead ms before it plays. */
 uint32_t ua4fx_engine_safety_offset_output(engine_t *e) { return ms_to_frames(e, (double)e->outLead + 1.5); }
-/* Input: frame F is harvested at the tick right after it ends (≤ ~1.2 ms), plus margin. */
-uint32_t ua4fx_engine_safety_offset_input(engine_t *e)  { return ms_to_frames(e, (double)e->nf + 1.5); }
+/* Input: frame F lands in the ring ≤ ~0.9 ms after it ends (measured), plus margin. */
+uint32_t ua4fx_engine_safety_offset_input(engine_t *e)  { return ms_to_frames(e, (double)e->nf + 0.5); }
 
 void ua4fx_engine_set_config(engine_t *e, const ua4fx_config_t *c) {
     uint32_t nf = c->framesPerXfer, nb = c->xfersInFlight, no = c->xfersInFlightOut, lead = c->outputLeadMs;

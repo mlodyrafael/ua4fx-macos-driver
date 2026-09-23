@@ -131,7 +131,7 @@ final class Model: ObservableObject {
     func bool(_ k: String) -> Bool { stats[k] as? Bool ?? false }
     // predicted safety offsets for the *selected* geometry (same formula as the engine)
     var predictedOut: Double { Double(outputLead) + 1.5 }
-    var predictedIn: Double { Double(framesPerXfer) + 1.5 }
+    var predictedIn: Double { Double(framesPerXfer) + 0.5 }
 }
 
 // MARK: - Views
