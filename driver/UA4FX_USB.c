@@ -350,7 +350,7 @@ static IOReturn stream_fill_queue_locked(stream_t *s) {
     return last;
 }
 
-static void harvest_locked(engine_t *e, UInt64 current);   /* tick-thread work, also usable from the callback under in.lock */
+static void harvest_locked(engine_t *e, xfer_t *force);   /* tick-thread work; `force` = a transfer whose callback fired (all its frames are final) */
 
 static void xfer_complete(void *refcon, IOReturn result, void *arg0) {
     (void)arg0;
@@ -360,7 +360,7 @@ static void xfer_complete(void *refcon, IOReturn result, void *arg0) {
     if (s->stopping || !atomic_load(&e->running)) { atomic_store(&x->ready, false); os_unfair_lock_unlock(&s->lock); return; }
     if (result == kIOReturnAborted || result == kIOReturnNotResponding || result == kIOReturnNoDevice) { atomic_store(&x->ready, false); os_unfair_lock_unlock(&s->lock); return; }
     if (s->isInput) {
-        harvest_locked(e, UINT64_MAX);            /* the transfer is complete: take whatever is left */
+        harvest_locked(e, x);                     /* the transfer is complete: take whatever is left of it */
         for (uint32_t i = 0; i < e->nf; i++) if (!x->done[i]) e->lateHarvests++;
     } else {
         for (uint32_t i = 0; i < e->nf; i++) { if (x->fl[i].frStatus != kIOReturnSuccess && x->fl[i].frStatus != kIOReturnUnderrun) e->txErrors++; }
@@ -375,15 +375,15 @@ static void xfer_complete(void *refcon, IOReturn result, void *arg0) {
 /* tick thread: harvest capture, fill playback                                 */
 
 /* A frame is finished when the HC stamped it or delivered data. Frames that errored without
- * either are only finalized by the completion callback (current == UINT64_MAX). */
-static bool frame_finished(const IOUSBLowLatencyIsocFrame *f, UInt64 frame, UInt64 current) {
-    (void)frame;
+ * either are only finalized once their transfer's completion callback fired (`forced`).
+ * Note: the kernel keeps a non-zero "not sent" status in frStatus while a frame is pending. */
+static bool frame_finished(const IOUSBLowLatencyIsocFrame *f, bool forced) {
     if (at2u64(f->frTimeStamp) != 0 || f->frActCount != 0) return true;
-    return current == UINT64_MAX;
+    return forced;
 }
 
 /* in.lock held */
-static void harvest_locked(engine_t *e, UInt64 current) {
+static void harvest_locked(engine_t *e, xfer_t *force) {
     stream_t *s = &e->in;
     for (;;) {
         xfer_t *x = find_xfer(s, e->nextHarvestFrame);
@@ -395,7 +395,7 @@ static void harvest_locked(engine_t *e, UInt64 current) {
         uint32_t i = (uint32_t)(e->nextHarvestFrame - x->frame);
         if (x->done[i]) { e->nextHarvestFrame++; continue; }
         IOUSBLowLatencyIsocFrame *f = &x->fl[i];
-        if (!frame_finished(f, e->nextHarvestFrame, current)) return;   /* HC has not finished this frame yet */
+        if (!frame_finished(f, x == force)) return;                     /* HC has not finished this frame yet */
         IOReturn st = f->frStatus;
         uint32_t n = (st == kIOReturnSuccess || st == kIOReturnUnderrun) ? f->frActCount / BPF : 0;
         if (n == 0 && st != kIOReturnSuccess && st != kIOReturnUnderrun) e->rxErrors++;
@@ -408,7 +408,7 @@ static void harvest_locked(engine_t *e, UInt64 current) {
         }
         if (e->captureMaster) clock_advance(e, n, hostEnd);
         if (at2u64(f->frTimeStamp)) { double lag = ((double)mach_absolute_time() - (double)hostEnd) / e->ticksPerMs * 1000.0; if (lag > e->harvestLagMaxUs) e->harvestLagMaxUs = lag; else e->harvestLagMaxUs *= 0.9995; }
-        if (current == UINT64_MAX) e->harvestedByCallback++; else e->harvestedByPoll++;
+        if (force) e->harvestedByCallback++; else e->harvestedByPoll++;
         atomic_fetch_add(&e->rxCompleted, n);
         atomic_store(&e->lastHarvestFrame, e->nextHarvestFrame);
         e->rxPackets++; e->rxBusFrames++;
@@ -469,13 +469,13 @@ static void fill_locked(engine_t *e, UInt64 target, UInt64 current) {
 }
 
 /* out.lock held: account completed playback frames (stats; clock when there is no capture) */
-static void poll_tx_locked(engine_t *e, UInt64 current) {
+static void poll_tx_locked(engine_t *e) {
     stream_t *s = &e->out;
     for (;;) {
         xfer_t *x = find_xfer(s, e->nextTxPollFrame);
         if (!x) { UInt64 nf; if (next_ready_frame_after(s, e->nextTxPollFrame, &nf)) { e->nextTxPollFrame = nf; continue; } return; }
         uint32_t i = (uint32_t)(e->nextTxPollFrame - x->frame);
-        if (!frame_finished(&x->fl[i], e->nextTxPollFrame, current)) return;
+        if (!frame_finished(&x->fl[i], false)) return;
         e->txCompleted += x->cnt[i]; e->txPackets++;
         if (!e->captureMaster) {
             uint64_t hostEnd = at2u64(x->fl[i].frTimeStamp);
@@ -500,8 +500,8 @@ static void *tick_thread(void *arg) {
         int64_t k = (int64_t)(((double)now - (double)rh) / tpm); if (k < 0) k = 0;
         UInt64 current = rf + 1 + (UInt64)k;
 
-        if (e->in.streaming) { os_unfair_lock_lock(&e->in.lock); harvest_locked(e, current); os_unfair_lock_unlock(&e->in.lock); }
-        if (e->out.streaming) { os_unfair_lock_lock(&e->out.lock); poll_tx_locked(e, current); fill_locked(e, current + e->outLead, current); os_unfair_lock_unlock(&e->out.lock); }
+        if (e->in.streaming) { os_unfair_lock_lock(&e->in.lock); harvest_locked(e, NULL); os_unfair_lock_unlock(&e->in.lock); }
+        if (e->out.streaming) { os_unfair_lock_lock(&e->out.lock); poll_tx_locked(e); fill_locked(e, current + e->outLead, current); os_unfair_lock_unlock(&e->out.lock); }
 
         /* sleep until shortly after the next frame boundary */
         ref_read(e, &rf, &rh);
