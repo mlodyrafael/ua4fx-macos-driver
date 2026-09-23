@@ -363,7 +363,7 @@ static void xfer_complete(void *refcon, IOReturn result, void *arg0) {
         harvest_locked(e, x);                     /* the transfer is complete: take whatever is left of it */
         for (uint32_t i = 0; i < e->nf; i++) if (!x->done[i]) e->lateHarvests++;
     } else {
-        for (uint32_t i = 0; i < e->nf; i++) { if (x->fl[i].frStatus != kIOReturnSuccess && x->fl[i].frStatus != kIOReturnUnderrun) e->txErrors++; }
+        for (uint32_t i = 0; i < e->nf; i++) { if (x->fl[i].frStatus != kIOReturnSuccess && x->fl[i].frStatus != kIOReturnUnderrun) e->txErrors++; e->txCompleted += x->cnt[i]; e->txPackets++; }
     }
     atomic_store_explicit(&x->ready, false, memory_order_release);
     IOReturn kr = stream_fill_queue_locked(s);
@@ -476,7 +476,6 @@ static void poll_tx_locked(engine_t *e) {
         if (!x) { UInt64 nf; if (next_ready_frame_after(s, e->nextTxPollFrame, &nf)) { e->nextTxPollFrame = nf; continue; } return; }
         uint32_t i = (uint32_t)(e->nextTxPollFrame - x->frame);
         if (!frame_finished(&x->fl[i], false)) return;
-        e->txCompleted += x->cnt[i]; e->txPackets++;
         if (!e->captureMaster) {
             uint64_t hostEnd = at2u64(x->fl[i].frTimeStamp);
             if (hostEnd) { ref_publish(e, e->nextTxPollFrame, hostEnd); clock_advance(e, x->cnt[i], hostEnd); atomic_fetch_add(&e->rxCompleted, x->cnt[i]);
