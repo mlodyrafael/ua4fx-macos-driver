@@ -29,7 +29,7 @@ extern "C" {
 #define UA4FX_MAX_FRAMES_PER_XFER   8     /* ms of audio per isoch transfer   */
 #define UA4FX_MAX_XFERS_IN_FLIGHT   8     /* transfers queued per direction    */
 #define UA4FX_DEFAULT_FRAMES_PER_XFER 1
-#define UA4FX_DEFAULT_XFERS_IN_FLIGHT 4       /* capture queue depth  */
+#define UA4FX_DEFAULT_XFERS_IN_FLIGHT 8       /* capture queue depth (schedule headroom only; input latency does not depend on it) */
 #define UA4FX_DEFAULT_XFERS_IN_FLIGHT_OUT 8   /* playback queue depth (ms queued ahead); data is filled late, see UA4FX_DEFAULT_OUTPUT_LEAD_MS */
 #define UA4FX_DEFAULT_OUTPUT_LEAD_MS      2   /* playback data written into the queued DMA buffer this many ms before it is transmitted */
 #define UA4FX_RING_FRAMES           32768 /* power of two, audio frames        */
@@ -100,6 +100,8 @@ typedef struct {
     uint32_t lateCompletions;          /* tick wake-ups later than 0.7 ms */
     uint32_t lateFills;                /* playback frames the tick thread could not fill before transmission */
     uint32_t lateHarvests;             /* capture frames only picked up by the completion callback */
+    double   harvestLagMaxUs;          /* decaying max: capture frame end -> data in ring */
+    uint64_t harvestedByPoll, harvestedByCallback;
     bool     rtPolicyOK;               /* USB thread got the time-constraint policy */
 } ua4fx_stats_t;
 void ua4fx_engine_get_stats(ua4fx_engine_t *e, ua4fx_stats_t *out);

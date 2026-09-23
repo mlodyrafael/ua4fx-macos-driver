@@ -207,6 +207,8 @@ struct ContentView: View {
                         StatusRow(label: "Tick wake-up lateness (max)", value: m.bool("running") ? String(format: "%.0f µs", m.dbl("maxCompletionLatencyUs")) : "–", color: m.dbl("maxCompletionLatencyUs") > 500 ? .orange : .primary)
                         StatusRow(label: "Late ticks (> 0.7 ms)", value: "\(m.int("lateCompletions"))", color: m.int("lateCompletions") > 0 ? .orange : .primary)
                         StatusRow(label: "Late fills / late harvests", value: "\(m.int("lateFills")) / \(m.int("lateHarvests"))", color: (m.int("lateFills") + m.int("lateHarvests")) > 0 ? .orange : .primary)
+                        StatusRow(label: "Capture frame → ring (max)", value: m.bool("running") ? String(format: "%.0f µs", m.dbl("harvestLagMaxUs")) : "–", color: m.dbl("harvestLagMaxUs") > 2500 ? .orange : .primary)
+                        StatusRow(label: "Harvested by poll / by callback", value: String(format: "%.0f / %.0f", m.dbl("harvestedByPoll"), m.dbl("harvestedByCallback")))
                         StatusRow(label: "USB thread real-time policy", value: m.stats.isEmpty ? "–" : (m.bool("rtPolicyOK") ? "yes" : "NO"), color: m.stats.isEmpty || m.bool("rtPolicyOK") ? .primary : .red)
                         StatusRow(label: "Non-nominal packets", value: "\(m.int("packetsAdjusted"))")
                         StatusRow(label: "Driver version", value: m.stats["driverVersion"] as? String ?? "–")

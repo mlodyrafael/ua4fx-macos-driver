@@ -36,7 +36,11 @@ $(BUILD)/ua4fx_midid: midi/ua4fx_midid.c $(HDRS)
 	$(CC) $(CFLAGS) -DUA4FX_LOG_STDERR=1 -o $@ midi/ua4fx_midid.c $(FW_BASE) -framework CoreMIDI
 	codesign --force --sign - $@
 
-tools: $(BUILD)/ua4fx_test $(BUILD)/hal_harness
+tools: $(BUILD)/ua4fx_test $(BUILD)/hal_harness $(BUILD)/rtl_test
+
+$(BUILD)/rtl_test: tools/rtl_test.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/rtl_test.c $(FW_BASE) -framework CoreAudio
 
 $(BUILD)/ua4fx_test: tools/ua4fx_test.c $(ENGINE) $(HDRS)
 	@mkdir -p $(BUILD)

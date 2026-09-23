@@ -141,6 +141,9 @@ struct ua4fx_engine {
     _Atomic double outRate;              /* frames per bus frame, tick thread -> USB thread */
     atomic_bool realignRequest;
     uint32_t packetsAdjusted, snaps, lateFills, lateHarvests;
+    double   harvestLagMaxUs;            /* decaying max: harvest time - frame end */
+    uint64_t harvestedByPoll, harvestedByCallback;
+    uint64_t lastRealignHost;
     int32_t  feedbackErr;
     bool     captureMaster;
     uint64_t resyncs; uint64_t lastResyncHost;
@@ -371,11 +374,12 @@ static void xfer_complete(void *refcon, IOReturn result, void *arg0) {
 /* ------------------------------------------------------------------------- */
 /* tick thread: harvest capture, fill playback                                 */
 
-/* A frame is finished when the HC stamped it (or delivered data), or — for frames that
- * errored without either — when it ended ≥ 3 bus frames ago. */
+/* A frame is finished when the HC stamped it or delivered data. Frames that errored without
+ * either are only finalized by the completion callback (current == UINT64_MAX). */
 static bool frame_finished(const IOUSBLowLatencyIsocFrame *f, UInt64 frame, UInt64 current) {
+    (void)frame;
     if (at2u64(f->frTimeStamp) != 0 || f->frActCount != 0) return true;
-    return current == UINT64_MAX || (current > frame && current - frame >= 3);
+    return current == UINT64_MAX;
 }
 
 /* in.lock held */
@@ -403,6 +407,8 @@ static void harvest_locked(engine_t *e, UInt64 current) {
             for (uint32_t k = 0; k < n; k++) memcpy(e->inRing + ((pos + k) & (RING - 1)) * BPF, src + k * BPF, BPF);
         }
         if (e->captureMaster) clock_advance(e, n, hostEnd);
+        if (at2u64(f->frTimeStamp)) { double lag = ((double)mach_absolute_time() - (double)hostEnd) / e->ticksPerMs * 1000.0; if (lag > e->harvestLagMaxUs) e->harvestLagMaxUs = lag; else e->harvestLagMaxUs *= 0.9995; }
+        if (current == UINT64_MAX) e->harvestedByCallback++; else e->harvestedByPoll++;
         atomic_fetch_add(&e->rxCompleted, n);
         atomic_store(&e->lastHarvestFrame, e->nextHarvestFrame);
         e->rxPackets++; e->rxBusFrames++;
@@ -417,8 +423,9 @@ static void harvest_locked(engine_t *e, UInt64 current) {
                 double avg = (double)atomic_load(&e->rxCompleted) / (double)e->rxBusFrames;
                 double lo = e->nominalPerMs * 0.998, hi = e->nominalPerMs * 1.002;
                 if (avg < lo) avg = lo; else if (avg > hi) avg = hi;
-                if (err > (int64_t)(e->nominalPerMs * 3.0) || err < -(int64_t)(e->nominalPerMs * 3.0)) {
-                    atomic_store(&e->realignRequest, true); atomic_store(&e->outRate, avg);
+                uint64_t nowH = mach_absolute_time();
+                if ((err > (int64_t)(e->nominalPerMs * 3.0) || err < -(int64_t)(e->nominalPerMs * 3.0)) && nowH - e->lastRealignHost > (uint64_t)(e->ticksPerMs * 100.0)) {
+                    e->lastRealignHost = nowH; atomic_store(&e->realignRequest, true); atomic_store(&e->outRate, avg);
                 } else {
                     double rate = avg - (double)err / 2000.0;
                     if (rate < lo) rate = lo; else if (rate > hi) rate = hi;
@@ -573,6 +580,7 @@ static void job_start(engine_t *e, void *arg) {
     e->txSubmitted = e->txCompleted = 0; e->rxPackets = e->txPackets = e->rxErrors = e->txErrors = 0;
     e->rxBusFrames = 0; e->lostInFrames = e->lostOutFrames = 0; e->packetsAdjusted = e->snaps = e->lateFills = e->lateHarvests = 0;
     e->feedbackErr = 0; e->rateT0Host = 0; e->measuredRate = 0; e->maxTickLatUs = 0; e->lateTicks = 0;
+    e->harvestLagMaxUs = 0; e->harvestedByPoll = e->harvestedByCallback = 0; e->lastRealignHost = 0;
     memset(e->posMap, 0, sizeof e->posMap); atomic_store(&e->realignRequest, false);
     e->outAccum = 0; e->nominalPerMs = e->rate / 1000.0; atomic_store(&e->outRate, e->nominalPerMs);
     e->ticksPerMs = mach_ticks_per_ms(); e->ticksPerFrame = e->ticksPerMs / e->nominalPerMs;
@@ -626,6 +634,7 @@ static void job_stop(engine_t *e, void *arg) {
         (unsigned long long)atomic_load(&e->rxCompleted), (unsigned long long)e->txCompleted, (unsigned long long)e->rxErrors, (unsigned long long)e->txErrors,
         (unsigned long long)e->lostInFrames, (unsigned long long)e->lostOutFrames, (unsigned long long)e->resyncs, e->snaps, e->measuredRate, atomic_load(&e->outRate), e->feedbackErr,
         e->maxTickLatUs, e->lateTicks, e->lateFills, e->lateHarvests);
+    LOG("harvest: byPoll=%llu byCallback=%llu lagMax=%.0fus", (unsigned long long)e->harvestedByPoll, (unsigned long long)e->harvestedByCallback, e->harvestLagMaxUs);
 }
 
 int  ua4fx_engine_start(engine_t *e) { int res = 0; engine_sync(e, job_start, &res); return res; }
@@ -856,5 +865,6 @@ void ua4fx_engine_get_stats(engine_t *e, ua4fx_stats_t *o) {
     o->outRate = atomic_load(&e->outRate); o->packetsAdjusted = e->packetsAdjusted;
     o->snaps = e->snaps; o->maxCompletionLatencyUs = e->maxTickLatUs; o->lateCompletions = e->lateTicks;
     o->lateFills = e->lateFills; o->lateHarvests = e->lateHarvests;
+    o->harvestLagMaxUs = e->harvestLagMaxUs; o->harvestedByPoll = e->harvestedByPoll; o->harvestedByCallback = e->harvestedByCallback;
     o->rtPolicyOK = e->rtPolicyOK && (!e->tickStarted || e->tickRtOK);
 }

@@ -253,6 +253,7 @@ static CFDictionaryRef copy_stats_dict(void) {
     PUT_D("sampleRate", gSampleRate);
     PUT_I("framesPerXfer", st.framesPerXfer); PUT_I("xfersInFlight", st.xfersInFlight); PUT_I("xfersInFlightOut", st.xfersInFlightOut); PUT_I("outputLeadMs", st.outputLeadMs);
     PUT_I("lateFills", st.lateFills); PUT_I("lateHarvests", st.lateHarvests);
+    PUT_D("harvestLagMaxUs", st.harvestLagMaxUs); PUT_D("harvestedByPoll", st.harvestedByPoll); PUT_D("harvestedByCallback", st.harvestedByCallback);
     PUT_I("safetyOffsetInput", ua4fx_engine_safety_offset_input(gEngine));
     PUT_I("safetyOffsetOutput", ua4fx_engine_safety_offset_output(gEngine));
     PUT_D("rxFrames", st.rxFrames); PUT_D("txFrames", st.txFrames);
@@ -263,7 +264,7 @@ static CFDictionaryRef copy_stats_dict(void) {
     PUT_I("snaps", st.snaps); PUT_D("maxCompletionLatencyUs", st.maxCompletionLatencyUs); PUT_I("lateCompletions", st.lateCompletions);
     CFDictionarySetValue(d, CFSTR("rtPolicyOK"), st.rtPolicyOK ? kCFBooleanTrue : kCFBooleanFalse);
     PUT_I("ioClients", gIOCount);
-    CFDictionarySetValue(d, CFSTR("driverVersion"), CFSTR("0.5.0"));
+    CFDictionarySetValue(d, CFSTR("driverVersion"), CFSTR("0.5.2"));
 #undef PUT_I
 #undef PUT_D
     return d;
@@ -284,7 +285,7 @@ static OSStatus UA4FX_Initialize(AudioServerPlugInDriverRef inDriver, AudioServe
           if (CFGetTypeID(stored) == CFDictionaryGetTypeID()) {
               if (apply_config_dict(stored)) {
                   /* v0.2/v0.3 shipped 1 ms x 3 / x 5 with a shared depth; migrate to the split defaults */
-                  if (gPendingConfig.framesPerXfer == 1 && (gPendingConfig.xfersInFlight == 3 || gPendingConfig.xfersInFlight == 5)) gPendingConfig.xfersInFlight = UA4FX_DEFAULT_XFERS_IN_FLIGHT;
+                  if (gPendingConfig.framesPerXfer == 1 && gPendingConfig.xfersInFlight < 8) gPendingConfig.xfersInFlight = UA4FX_DEFAULT_XFERS_IN_FLIGHT;
                   if (!CFDictionaryContainsKey(stored, CFSTR("xfersInFlightOut"))) gPendingConfig.xfersInFlightOut = UA4FX_DEFAULT_XFERS_IN_FLIGHT_OUT;
                   if (!CFDictionaryContainsKey(stored, CFSTR("outputLeadMs"))) gPendingConfig.outputLeadMs = UA4FX_DEFAULT_OUTPUT_LEAD_MS;
                   ua4fx_engine_set_config(gEngine, &gPendingConfig);
