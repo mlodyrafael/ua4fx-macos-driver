@@ -73,6 +73,7 @@ final class Model: ObservableObject {
     @Published var framesPerXfer = 1
     @Published var xfersInFlight = 4
     @Published var xfersInFlightOut = 8
+    @Published var outputLead = 2
     @Published var inputGain = 0.0      // trim (dB), set here
     @Published var outputGain = 7.0     // trim (dB), set here
     @Published var inputVol = 0.0       // macOS volume control (dB), read back
@@ -106,6 +107,7 @@ final class Model: ObservableObject {
         framesPerXfer = c["framesPerXfer"] as? Int ?? framesPerXfer
         xfersInFlight = c["xfersInFlight"] as? Int ?? xfersInFlight
         xfersInFlightOut = c["xfersInFlightOut"] as? Int ?? xfersInFlightOut
+        outputLead = c["outputLeadMs"] as? Int ?? outputLead
         inputGain = c["inputTrimDB"] as? Double ?? inputGain
         outputGain = c["outputTrimDB"] as? Double ?? outputGain
         inputVol = c["inputVolumeDB"] as? Double ?? inputVol
@@ -119,7 +121,7 @@ final class Model: ObservableObject {
         let st = HAL.setConfig(dev, d)
         lastError = st == noErr ? "" : "Set config failed: \(st)"
     }
-    func applyGeometry() { push(["framesPerXfer": framesPerXfer, "xfersInFlight": xfersInFlight, "xfersInFlightOut": xfersInFlightOut]) }
+    func applyGeometry() { push(["framesPerXfer": framesPerXfer, "xfersInFlight": xfersInFlight, "xfersInFlightOut": xfersInFlightOut, "outputLeadMs": outputLead]) }
     func applyGains() { push(["inputTrimDB": inputGain, "outputTrimDB": outputGain, "inputMute": inputMute, "outputMute": outputMute]) }
 
     var rate: Double { stats["sampleRate"] as? Double ?? 48000 }
@@ -128,7 +130,7 @@ final class Model: ObservableObject {
     func dbl(_ k: String) -> Double { (stats[k] as? Double) ?? Double(stats[k] as? Int ?? 0) }
     func bool(_ k: String) -> Bool { stats[k] as? Bool ?? false }
     // predicted safety offsets for the *selected* geometry (same formula as the engine)
-    var predictedOut: Double { (Double(xfersInFlightOut + 1) * Double(framesPerXfer) + 1.5) }
+    var predictedOut: Double { Double(outputLead) + 1.5 }
     var predictedIn: Double { Double(framesPerXfer) + 1.5 }
 }
 
@@ -161,19 +163,20 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("Preset:")
-                            Button("Lowest") { m.framesPerXfer = 1; m.xfersInFlight = 3; m.xfersInFlightOut = 6; m.applyGeometry() }
-                            Button("Low (default)") { m.framesPerXfer = 1; m.xfersInFlight = 4; m.xfersInFlightOut = 8; m.applyGeometry() }
-                            Button("Balanced") { m.framesPerXfer = 2; m.xfersInFlight = 4; m.xfersInFlightOut = 6; m.applyGeometry() }
-                            Button("Safe") { m.framesPerXfer = 2; m.xfersInFlight = 6; m.xfersInFlightOut = 8; m.applyGeometry() }
+                            Button("Lowest") { m.framesPerXfer = 1; m.xfersInFlight = 4; m.xfersInFlightOut = 8; m.outputLead = 1; m.applyGeometry() }
+                            Button("Low (default)") { m.framesPerXfer = 1; m.xfersInFlight = 4; m.xfersInFlightOut = 8; m.outputLead = 2; m.applyGeometry() }
+                            Button("Balanced") { m.framesPerXfer = 1; m.xfersInFlight = 4; m.xfersInFlightOut = 8; m.outputLead = 3; m.applyGeometry() }
+                            Button("Safe") { m.framesPerXfer = 1; m.xfersInFlight = 6; m.xfersInFlightOut = 8; m.outputLead = 5; m.applyGeometry() }
                         }
                         Stepper("USB transfer size: \(m.framesPerXfer) ms", value: $m.framesPerXfer, in: 1...8, onEditingChanged: { if !$0 { m.applyGeometry() } })
                         Stepper("Capture transfers in flight: \(m.xfersInFlight)", value: $m.xfersInFlight, in: 2...8, onEditingChanged: { if !$0 { m.applyGeometry() } })
                         Stepper("Playback transfers in flight: \(m.xfersInFlightOut)", value: $m.xfersInFlightOut, in: 2...8, onEditingChanged: { if !$0 { m.applyGeometry() } })
+                        Stepper("Playback fill lead: \(m.outputLead) ms", value: $m.outputLead, in: 1...7, onEditingChanged: { if !$0 { m.applyGeometry() } })
                         Divider()
                         StatusRow(label: "Output safety offset (driver)", value: m.ms(m.stats["safetyOffsetOutput"]))
                         StatusRow(label: "Input safety offset (driver)", value: m.ms(m.stats["safetyOffsetInput"]))
                         StatusRow(label: "Selected geometry → out / in", value: String(format: "%.1f ms / %.1f ms", m.predictedOut, m.predictedIn))
-                        Text("Total round trip ≈ DAW buffer × 2 + out + in + converters (~1 ms). Fewer transfers in flight = less latency but less headroom for USB scheduling; if 'Schedule resyncs' below keeps counting, go up one step. Changing geometry restarts the device IO (apps re-open it automatically).")
+                        Text("Total round trip ≈ DAW buffer × 2 + out + in + converters (~1 ms). Output latency is set by the fill lead (data is written into the queued USB buffers that many ms before transmission); transfers in flight only give the USB schedule headroom. If 'Late fills' or 'Schedule resyncs' keep counting, raise the lead by 1 ms. Changing geometry restarts the device IO (apps re-open it automatically).")
                             .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                     }.padding(6)
                 }
@@ -201,8 +204,9 @@ struct ContentView: View {
                         StatusRow(label: "USB errors rx / tx", value: String(format: "%.0f / %.0f", m.dbl("rxErrors"), m.dbl("txErrors")), color: (m.dbl("rxErrors") + m.dbl("txErrors")) > 0 ? .orange : .primary)
                         StatusRow(label: "Schedule resyncs", value: String(format: "%.0f", m.dbl("resyncs")), color: m.dbl("resyncs") > 0 ? .orange : .primary)
                         StatusRow(label: "Playback pointer snaps", value: "\(m.int("snaps"))", color: m.int("snaps") > 0 ? .orange : .primary)
-                        StatusRow(label: "Completion latency (max)", value: m.bool("running") ? String(format: "%.0f µs", m.dbl("maxCompletionLatencyUs")) : "–", color: m.dbl("maxCompletionLatencyUs") > 1000 ? .orange : .primary)
-                        StatusRow(label: "Late completions (> 1 ms)", value: "\(m.int("lateCompletions"))", color: m.int("lateCompletions") > 0 ? .orange : .primary)
+                        StatusRow(label: "Tick wake-up lateness (max)", value: m.bool("running") ? String(format: "%.0f µs", m.dbl("maxCompletionLatencyUs")) : "–", color: m.dbl("maxCompletionLatencyUs") > 500 ? .orange : .primary)
+                        StatusRow(label: "Late ticks (> 0.7 ms)", value: "\(m.int("lateCompletions"))", color: m.int("lateCompletions") > 0 ? .orange : .primary)
+                        StatusRow(label: "Late fills / late harvests", value: "\(m.int("lateFills")) / \(m.int("lateHarvests"))", color: (m.int("lateFills") + m.int("lateHarvests")) > 0 ? .orange : .primary)
                         StatusRow(label: "USB thread real-time policy", value: m.stats.isEmpty ? "–" : (m.bool("rtPolicyOK") ? "yes" : "NO"), color: m.stats.isEmpty || m.bool("rtPolicyOK") ? .primary : .red)
                         StatusRow(label: "Non-nominal packets", value: "\(m.int("packetsAdjusted"))")
                         StatusRow(label: "Driver version", value: m.stats["driverVersion"] as? String ?? "–")

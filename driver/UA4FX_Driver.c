@@ -199,6 +199,7 @@ static CFDictionaryRef copy_config_dict(void) {
     n = num_i((int)c.framesPerXfer); CFDictionarySetValue(d, CFSTR("framesPerXfer"), n); CFRelease(n);
     n = num_i((int)c.xfersInFlight); CFDictionarySetValue(d, CFSTR("xfersInFlight"), n); CFRelease(n);
     n = num_i((int)c.xfersInFlightOut); CFDictionarySetValue(d, CFSTR("xfersInFlightOut"), n); CFRelease(n);
+    n = num_i((int)c.outputLeadMs); CFDictionarySetValue(d, CFSTR("outputLeadMs"), n); CFRelease(n);
     n = num_d(gInputTrimDB);   CFDictionarySetValue(d, CFSTR("inputTrimDB"), n);    CFRelease(n);
     n = num_d(gOutputTrimDB);  CFDictionarySetValue(d, CFSTR("outputTrimDB"), n);   CFRelease(n);
     n = num_d(gInputVolDB);    CFDictionarySetValue(d, CFSTR("inputVolumeDB"), n);  CFRelease(n);
@@ -224,10 +225,12 @@ static Boolean apply_config_dict(CFDictionaryRef d) {
     if (dict_get_d(d, CFSTR("framesPerXfer"), &v)) want.framesPerXfer = (uint32_t)v;
     if (dict_get_d(d, CFSTR("xfersInFlight"), &v)) want.xfersInFlight = (uint32_t)v;
     if (dict_get_d(d, CFSTR("xfersInFlightOut"), &v)) want.xfersInFlightOut = (uint32_t)v;
+    if (dict_get_d(d, CFSTR("outputLeadMs"), &v)) want.outputLeadMs = (uint32_t)v;
     if (want.framesPerXfer < 1) want.framesPerXfer = 1; if (want.framesPerXfer > UA4FX_MAX_FRAMES_PER_XFER) want.framesPerXfer = UA4FX_MAX_FRAMES_PER_XFER;
     if (want.xfersInFlight < 2) want.xfersInFlight = 2; if (want.xfersInFlight > UA4FX_MAX_XFERS_IN_FLIGHT) want.xfersInFlight = UA4FX_MAX_XFERS_IN_FLIGHT;
     if (want.xfersInFlightOut < 2) want.xfersInFlightOut = 2; if (want.xfersInFlightOut > UA4FX_MAX_XFERS_IN_FLIGHT) want.xfersInFlightOut = UA4FX_MAX_XFERS_IN_FLIGHT;
-    if (want.framesPerXfer != cur.framesPerXfer || want.xfersInFlight != cur.xfersInFlight || want.xfersInFlightOut != cur.xfersInFlightOut) { gPendingConfig = want; return true; }
+    if (want.outputLeadMs < 1) want.outputLeadMs = 1; if (want.outputLeadMs > want.xfersInFlightOut * want.framesPerXfer - 1) want.outputLeadMs = want.xfersInFlightOut * want.framesPerXfer - 1;
+    if (want.framesPerXfer != cur.framesPerXfer || want.xfersInFlight != cur.xfersInFlight || want.xfersInFlightOut != cur.xfersInFlightOut || want.outputLeadMs != cur.outputLeadMs) { gPendingConfig = want; return true; }
     return false;
 }
 static void save_config(void) {
@@ -248,7 +251,8 @@ static CFDictionaryRef copy_stats_dict(void) {
     CFDictionarySetValue(d, CFSTR("outputActive"), st.outputActive ? kCFBooleanTrue : kCFBooleanFalse);
     CFDictionarySetValue(d, CFSTR("captureMaster"), st.captureMaster ? kCFBooleanTrue : kCFBooleanFalse);
     PUT_D("sampleRate", gSampleRate);
-    PUT_I("framesPerXfer", st.framesPerXfer); PUT_I("xfersInFlight", st.xfersInFlight); PUT_I("xfersInFlightOut", st.xfersInFlightOut);
+    PUT_I("framesPerXfer", st.framesPerXfer); PUT_I("xfersInFlight", st.xfersInFlight); PUT_I("xfersInFlightOut", st.xfersInFlightOut); PUT_I("outputLeadMs", st.outputLeadMs);
+    PUT_I("lateFills", st.lateFills); PUT_I("lateHarvests", st.lateHarvests);
     PUT_I("safetyOffsetInput", ua4fx_engine_safety_offset_input(gEngine));
     PUT_I("safetyOffsetOutput", ua4fx_engine_safety_offset_output(gEngine));
     PUT_D("rxFrames", st.rxFrames); PUT_D("txFrames", st.txFrames);
@@ -259,7 +263,7 @@ static CFDictionaryRef copy_stats_dict(void) {
     PUT_I("snaps", st.snaps); PUT_D("maxCompletionLatencyUs", st.maxCompletionLatencyUs); PUT_I("lateCompletions", st.lateCompletions);
     CFDictionarySetValue(d, CFSTR("rtPolicyOK"), st.rtPolicyOK ? kCFBooleanTrue : kCFBooleanFalse);
     PUT_I("ioClients", gIOCount);
-    CFDictionarySetValue(d, CFSTR("driverVersion"), CFSTR("0.4.0"));
+    CFDictionarySetValue(d, CFSTR("driverVersion"), CFSTR("0.5.0"));
 #undef PUT_I
 #undef PUT_D
     return d;
@@ -282,6 +286,7 @@ static OSStatus UA4FX_Initialize(AudioServerPlugInDriverRef inDriver, AudioServe
                   /* v0.2/v0.3 shipped 1 ms x 3 / x 5 with a shared depth; migrate to the split defaults */
                   if (gPendingConfig.framesPerXfer == 1 && (gPendingConfig.xfersInFlight == 3 || gPendingConfig.xfersInFlight == 5)) gPendingConfig.xfersInFlight = UA4FX_DEFAULT_XFERS_IN_FLIGHT;
                   if (!CFDictionaryContainsKey(stored, CFSTR("xfersInFlightOut"))) gPendingConfig.xfersInFlightOut = UA4FX_DEFAULT_XFERS_IN_FLIGHT_OUT;
+                  if (!CFDictionaryContainsKey(stored, CFSTR("outputLeadMs"))) gPendingConfig.outputLeadMs = UA4FX_DEFAULT_OUTPUT_LEAD_MS;
                   ua4fx_engine_set_config(gEngine, &gPendingConfig);
               }
           }
@@ -314,7 +319,7 @@ static OSStatus UA4FX_PerformDeviceConfigurationChange(AudioServerPlugInDriverRe
         pthread_mutex_lock(&gStateMutex);
         ua4fx_engine_set_config(gEngine, &gPendingConfig);
         pthread_mutex_unlock(&gStateMutex);
-        LOG("HAL: geometry changed to %u ms, in x %u, out x %u", gPendingConfig.framesPerXfer, gPendingConfig.xfersInFlight, gPendingConfig.xfersInFlightOut);
+        LOG("HAL: geometry changed to %u ms, in x %u, out x %u, lead %u ms", gPendingConfig.framesPerXfer, gPendingConfig.xfersInFlight, gPendingConfig.xfersInFlightOut, gPendingConfig.outputLeadMs);
         save_config();
         AudioObjectPropertyAddress addrs[4] = {
             { kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeInput,  kAudioObjectPropertyElementMain },

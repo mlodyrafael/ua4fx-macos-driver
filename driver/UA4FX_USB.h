@@ -30,7 +30,8 @@ extern "C" {
 #define UA4FX_MAX_XFERS_IN_FLIGHT   8     /* transfers queued per direction    */
 #define UA4FX_DEFAULT_FRAMES_PER_XFER 1
 #define UA4FX_DEFAULT_XFERS_IN_FLIGHT 4       /* capture queue depth  */
-#define UA4FX_DEFAULT_XFERS_IN_FLIGHT_OUT 8   /* playback queue depth: OUT completions arrive up to ~3.5 ms late on XHCI */
+#define UA4FX_DEFAULT_XFERS_IN_FLIGHT_OUT 8   /* playback queue depth (ms queued ahead); data is filled late, see UA4FX_DEFAULT_OUTPUT_LEAD_MS */
+#define UA4FX_DEFAULT_OUTPUT_LEAD_MS      2   /* playback data written into the queued DMA buffer this many ms before it is transmitted */
 #define UA4FX_RING_FRAMES           32768 /* power of two, audio frames        */
 
 typedef struct ua4fx_engine ua4fx_engine_t;
@@ -43,6 +44,7 @@ typedef struct {
     uint32_t framesPerXfer;    /* 1..UA4FX_MAX_FRAMES_PER_XFER (ms per transfer) */
     uint32_t xfersInFlight;    /* capture:  2..UA4FX_MAX_XFERS_IN_FLIGHT         */
     uint32_t xfersInFlightOut; /* playback: 2..UA4FX_MAX_XFERS_IN_FLIGHT         */
+    uint32_t outputLeadMs;     /* playback fill lead: 1..(xfersInFlightOut*framesPerXfer-1) */
 } ua4fx_config_t;
 
 /* Lifecycle */
@@ -83,7 +85,7 @@ void ua4fx_engine_write_output(ua4fx_engine_t *e, int64_t sampleTime, uint32_t f
 /* Diagnostics */
 typedef struct {
     bool     running, inputActive, outputActive, captureMaster;
-    uint32_t framesPerXfer, xfersInFlight, xfersInFlightOut;
+    uint32_t framesPerXfer, xfersInFlight, xfersInFlightOut, outputLeadMs;
     uint64_t rxFrames, txFrames;       /* audio frames */
     uint64_t rxPackets, txPackets;     /* USB packets */
     uint64_t rxErrors, txErrors;       /* frames with frStatus != 0 */
@@ -94,8 +96,10 @@ typedef struct {
     int32_t  feedbackError;            /* tx - rx at the same bus frame, frames */
     uint32_t packetsAdjusted;          /* playback packets that deviated from the nominal size */
     uint32_t snaps;                    /* hard realignments of the playback read pointer */
-    double   maxCompletionLatencyUs;   /* decaying max: completion callback vs. frame end */
-    uint32_t lateCompletions;          /* completions > 1 ms after the frame ended */
+    double   maxCompletionLatencyUs;   /* decaying max: tick thread wake-up lateness */
+    uint32_t lateCompletions;          /* tick wake-ups later than 0.7 ms */
+    uint32_t lateFills;                /* playback frames the tick thread could not fill before transmission */
+    uint32_t lateHarvests;             /* capture frames only picked up by the completion callback */
     bool     rtPolicyOK;               /* USB thread got the time-constraint policy */
 } ua4fx_stats_t;
 void ua4fx_engine_get_stats(ua4fx_engine_t *e, ua4fx_stats_t *out);
