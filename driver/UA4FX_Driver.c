@@ -264,7 +264,7 @@ static CFDictionaryRef copy_stats_dict(void) {
     PUT_I("snaps", st.snaps); PUT_D("maxCompletionLatencyUs", st.maxCompletionLatencyUs); PUT_I("lateCompletions", st.lateCompletions);
     CFDictionarySetValue(d, CFSTR("rtPolicyOK"), st.rtPolicyOK ? kCFBooleanTrue : kCFBooleanFalse);
     PUT_I("ioClients", gIOCount);
-    CFDictionarySetValue(d, CFSTR("driverVersion"), CFSTR("0.5.6"));
+    CFDictionarySetValue(d, CFSTR("driverVersion"), CFSTR("0.5.7"));
 #undef PUT_I
 #undef PUT_D
     return d;

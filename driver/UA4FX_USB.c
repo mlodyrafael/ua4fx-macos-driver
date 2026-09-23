@@ -488,28 +488,57 @@ static void poll_tx_locked(engine_t *e) {
     }
 }
 
+/* The tick thread is a small PLL: it wakes every 1 ms (bus frame) at a fixed phase after the
+ * frame boundary and slews that phase slowly toward the boundaries reported by the host
+ * controller's frame timestamps. A single bad timestamp therefore cannot skip a tick, and the
+ * current-frame estimate follows the tick cadence unless the reference disagrees persistently. */
 static void *tick_thread(void *arg) {
     engine_t *e = (engine_t *)arg;
     pthread_setname_np("ua4fx-tick");
     e->tickRtOK = set_realtime(1.0, 0.1, 0.3);
     const double tpm = e->ticksPerMs;
-    uint64_t plannedWake = 0;
+    const double offset = TICK_OFFSET_US / 1000.0 * tpm;
+    const double maxSlew = 0.05 * tpm;               /* 50 µs per tick */
+    uint64_t plannedWake = 0; UInt64 lastCurrent = 0; int driftSign = 0, driftCount = 0;
     while (atomic_load(&e->tickRun)) {
         uint64_t now = mach_absolute_time();
         if (plannedWake) { double lat = ((double)now - (double)plannedWake) / tpm * 1000.0; if (lat > e->maxTickLatUs) e->maxTickLatUs = lat; else e->maxTickLatUs *= 0.9995; if (lat > 700.0) e->lateTicks++; }
         UInt64 rf; uint64_t rh; ref_read(e, &rf, &rh);
-        /* frame `rf` ended at `rh`; the frame in progress now: */
+        /* frame `rf` ended at `rh`; reference-derived frame in progress now: */
         int64_t k = (int64_t)(((double)now - (double)rh) / tpm); if (k < 0) k = 0;
-        UInt64 current = rf + 1 + (UInt64)k;
+        UInt64 refCurrent = rf + 1 + (UInt64)k;
+        UInt64 current;
+        if (!lastCurrent) current = refCurrent;
+        else {
+            UInt64 expected = lastCurrent + 1;
+            int64_t d = (int64_t)refCurrent - (int64_t)expected;
+            if (d == 0) { current = expected; driftCount = 0; }
+            else if (d == 1 || d == -1) {
+                /* one-frame disagreement: follow the cadence unless it persists (real drift) */
+                if (driftSign == (int)d) driftCount++; else { driftSign = (int)d; driftCount = 1; }
+                current = driftCount >= 3 ? refCurrent : expected;
+                if (driftCount >= 3) driftCount = 0;
+            } else current = refCurrent;                  /* far off (e.g. after a stall): resync */
+        }
+        lastCurrent = current;
 
         if (e->in.streaming) { os_unfair_lock_lock(&e->in.lock); harvest_locked(e, NULL); os_unfair_lock_unlock(&e->in.lock); }
         if (e->out.streaming) { os_unfair_lock_lock(&e->out.lock); poll_tx_locked(e); fill_locked(e, current + e->outLead, current); os_unfair_lock_unlock(&e->out.lock); }
 
-        /* sleep until shortly after the next frame boundary */
+        /* next wake: cadence + bounded slew toward the reference boundary */
         ref_read(e, &rf, &rh);
         double sinceRef = (double)mach_absolute_time() - (double)rh;
         int64_t kk = (int64_t)(sinceRef / tpm) + 1;
-        plannedWake = rh + (uint64_t)((double)kk * tpm + TICK_OFFSET_US / 1000.0 * tpm);
+        double ideal = (double)rh + (double)kk * tpm + offset;
+        if (!plannedWake) plannedWake = (uint64_t)ideal;
+        else {
+            double next = (double)plannedWake + tpm;
+            double diff = ideal - next;
+            if (diff > 2.0 * tpm || diff < -2.0 * tpm) next = ideal;            /* lost the phase entirely */
+            else if (diff > maxSlew) next += maxSlew; else if (diff < -maxSlew) next -= maxSlew; else next += diff;
+            if (next < (double)mach_absolute_time()) next = ideal;              /* never wait for the past */
+            plannedWake = (uint64_t)next;
+        }
         mach_wait_until(plannedWake);
     }
     return NULL;
