@@ -52,7 +52,8 @@
 #define START_LEAD_FRAMES 4          /* first submission this many bus frames ahead */
 #define RESYNC_LEAD_FRAMES 4
 #define TICK_OFFSET_US 200.0         /* wake this long after a frame boundary */
-#define FRAME_PENDING 0x7FFFFF11     /* our frStatus sentinel until the HC writes a real status */
+/* frStatus must be 0 at submission (IOUSBLib rejects other values); completion is detected from
+ * frTimeStamp / frActCount, which we zero and the host controller fills in at primary interrupt time. */
 #define POSMAP 64                    /* playback position map depth (bus frames) */
 
 typedef struct ua4fx_engine engine_t;
@@ -293,7 +294,7 @@ static IOReturn submit_xfer(stream_t *s, xfer_t *x) {
     x->frame = s->nextFrame;
     memset(x->done, 0, sizeof x->done);
     if (s->isInput) {
-        for (uint32_t i = 0; i < nf; i++) { x->fl[i].frReqCount = s->maxPacket; x->fl[i].frActCount = 0; x->fl[i].frStatus = FRAME_PENDING; memset(&x->fl[i].frTimeStamp, 0, sizeof(AbsoluteTime)); }
+        for (uint32_t i = 0; i < nf; i++) { x->fl[i].frReqCount = s->maxPacket; x->fl[i].frActCount = 0; x->fl[i].frStatus = 0; memset(&x->fl[i].frTimeStamp, 0, sizeof(AbsoluteTime)); }
     } else {
         if (atomic_exchange(&e->realignRequest, false) && e->captureMaster) {
             /* put the read pointer where the capture timeline says this frame will be */
@@ -308,7 +309,7 @@ static IOReturn submit_xfer(stream_t *s, xfer_t *x) {
             if (n != (uint32_t)e->nominalPerMs) e->packetsAdjusted++;
             x->pos[i] = e->txSubmitted; x->cnt[i] = n; x->off[i] = off; off += n * BPF;
             e->txSubmitted += n;
-            x->fl[i].frReqCount = n * BPF; x->fl[i].frActCount = 0; x->fl[i].frStatus = FRAME_PENDING; memset(&x->fl[i].frTimeStamp, 0, sizeof(AbsoluteTime));
+            x->fl[i].frReqCount = n * BPF; x->fl[i].frActCount = 0; x->fl[i].frStatus = 0; memset(&x->fl[i].frTimeStamp, 0, sizeof(AbsoluteTime));
             e->posMap[(x->frame + i) % POSMAP].frame = x->frame + i; e->posMap[(x->frame + i) % POSMAP].posEnd = e->txSubmitted;
         }
         memset(x->buf, 0, off);                /* silence unless the tick thread fills it in time */
@@ -359,7 +360,7 @@ static void xfer_complete(void *refcon, IOReturn result, void *arg0) {
         harvest_locked(e, UINT64_MAX);            /* the transfer is complete: take whatever is left */
         for (uint32_t i = 0; i < e->nf; i++) if (!x->done[i]) e->lateHarvests++;
     } else {
-        for (uint32_t i = 0; i < e->nf; i++) { if (x->fl[i].frStatus != kIOReturnSuccess && x->fl[i].frStatus != kIOReturnUnderrun && x->fl[i].frStatus != FRAME_PENDING) e->txErrors++; }
+        for (uint32_t i = 0; i < e->nf; i++) { if (x->fl[i].frStatus != kIOReturnSuccess && x->fl[i].frStatus != kIOReturnUnderrun) e->txErrors++; }
     }
     atomic_store_explicit(&x->ready, false, memory_order_release);
     IOReturn kr = stream_fill_queue_locked(s);
@@ -370,12 +371,11 @@ static void xfer_complete(void *refcon, IOReturn result, void *arg0) {
 /* ------------------------------------------------------------------------- */
 /* tick thread: harvest capture, fill playback                                 */
 
-/* A frame is finished when the HC replaced our sentinel status AND either stamped it or
- * it ended ≥ 2 bus frames ago (guards against a framework-written "pending" code). */
+/* A frame is finished when the HC stamped it (or delivered data), or — for frames that
+ * errored without either — when it ended ≥ 3 bus frames ago. */
 static bool frame_finished(const IOUSBLowLatencyIsocFrame *f, UInt64 frame, UInt64 current) {
-    if (f->frStatus == (IOReturn)FRAME_PENDING) return false;
     if (at2u64(f->frTimeStamp) != 0 || f->frActCount != 0) return true;
-    return current == UINT64_MAX || (current > frame && current - frame >= 2);
+    return current == UINT64_MAX || (current > frame && current - frame >= 3);
 }
 
 /* in.lock held */
@@ -415,11 +415,12 @@ static void harvest_locked(engine_t *e, UInt64 current) {
                 int64_t err = (int64_t)e->posMap[F % POSMAP].posEnd - (int64_t)atomic_load(&e->rxCompleted);
                 e->feedbackErr = (int32_t)err;
                 double avg = (double)atomic_load(&e->rxCompleted) / (double)e->rxBusFrames;
+                double lo = e->nominalPerMs * 0.998, hi = e->nominalPerMs * 1.002;
+                if (avg < lo) avg = lo; else if (avg > hi) avg = hi;
                 if (err > (int64_t)(e->nominalPerMs * 3.0) || err < -(int64_t)(e->nominalPerMs * 3.0)) {
                     atomic_store(&e->realignRequest, true); atomic_store(&e->outRate, avg);
                 } else {
                     double rate = avg - (double)err / 2000.0;
-                    double lo = e->nominalPerMs * 0.998, hi = e->nominalPerMs * 1.002;
                     if (rate < lo) rate = lo; else if (rate > hi) rate = hi;
                     atomic_store(&e->outRate, rate);
                 }
