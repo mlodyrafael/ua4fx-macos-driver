@@ -58,7 +58,7 @@ directly with the buffer size you pick in the DAW. Driver-side latency is set in
 | 96 kHz modes | Untested (switch was at 48 kHz). Designed for: half-duplex; the engine keeps whichever direction the device offers |
 | Volume / mute | Two layers: a *trim* set in UA4FX Control (default output +7 dB, input 0 dB) plus the macOS volume control (0…−60 dB, slider / media keys) exposed as HAL control objects. Effective gain = trim + volume |
 | Hot-plug | Verified: unplugging removes the device cleanly (coreaudiod and the MIDI bridge keep running), plugging in re-creates it |
-| UA4FX Control.app (`ui/`) | SwiftUI app: latency presets (USB transfer size / capture & playback queue depth), software input/output gain + mute, live engine statistics, MIDI bridge status, coreaudiod restart |
+| UA4FX Control.app (`ui/`) | SwiftUI app: latency presets (playback fill lead, queue depths), software input/output gain + mute, live engine statistics, MIDI bridge status, coreaudiod restart |
 
 ## Build & install
 
@@ -87,6 +87,7 @@ script falls back to `sudo killall coreaudiod` (launchd relaunches it immediatel
 ```bash
 ./build/ua4fx_test 10           # engine only: plays a 440 Hz tone, reads input, prints clock stats
 ./build/hal_harness build/UA4FX.driver 5   # drives the plug-in exactly like the HAL does
+./build/rtl_test 32                        # with a loopback cable (out -> in): true analog round-trip latency
 ```
 
 ## How the device works (research summary)
@@ -119,15 +120,17 @@ script falls back to `sudo killall coreaudiod` (launchd relaunches it immediatel
   `frTimeStamp` values (updated at primary interrupt time). The first transfer's timestamps
   are unreliable on XHCI, so the timeline origin is fixed from the second completed transfer
   before `StartIO` returns. Reported clock algorithm: 12-point moving average.
-* **Latency.** Default 1 ms transfers, 4 in flight for capture and 8 for playback: safety
-  offset 10.5 ms out / 2.5 ms in (504 / 120 frames at 48 kHz). Queue depth only affects the
-  *output* safety offset; input latency depends on the transfer size alone. Shallower queues
-  proved too tight on Apple's XHCI: OUT completions arrive up to ~3.5 ms after the frame ended,
-  so transfers were refused as IsoTooOld (schedule resyncs), which produced the v0.2 "bit-crush"
-  artifacts. A resync now moves both streams to a common frame and hard-realigns the playback
-  read pointer to the capture timeline instead of chasing the phase with a rate change. Runtime-tunable from UA4FX Control (1–8 ms, 2–8
-  transfers); a change goes through `RequestDeviceConfigurationChange`, so the host stops and
-  restarts IO cleanly. Settings persist in the HAL's plug-in storage.
+* **Latency.** The data path is a 1 ms real-time "tick" thread (phase-locked to the USB
+  frame clock) that reads capture frames straight from the transfer frame lists and writes
+  playback data into already-queued DMA buffers `outputLeadMs` before transmission ("late fill").
+  Transfers are queued 8 ms ahead in both directions purely as schedule headroom, so completion
+  callback latency no longer matters. Safety offsets: input 2.0 ms, output lead + 1.5 ms
+  (2.5 ms with the "Lowest" preset). Measured on an M-series MacBook Air at 32-frame buffers:
+  0 late fills / 0 resyncs over long runs, capture frame → ring ≤ 0.2 ms, tick jitter ≤ 15 µs.
+  REAPER shows `~2.2/3.2 ms` at 32 samples. The physical floor of a full-speed USB device
+  (1 ms packets each way + converters) adds ~3–4 ms that no driver on any OS can remove.
+  Settings persist in the HAL's plug-in storage; a geometry change goes through
+  `RequestDeviceConfigurationChange`, so the host stops and restarts IO cleanly.
 * **Control app protocol.** Two custom properties on the device object
   (`kAudioObjectPropertyCustomPropertyInfoList`): `'uacf'` config dict (framesPerXfer,
   xfersInFlight, inputTrimDB, outputTrimDB, inputVolumeDB, outputVolumeDB, inputMute, outputMute;
